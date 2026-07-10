@@ -7,6 +7,10 @@ root (``runs/<run>``, ``checkpoint.pt``, ``train.log``, ``train.err``,
 ``.train.pid``, ``figures/*.png``). ``data/`` itself is left alone -- it is
 the live working dataset, not part of any one run.
 
+The code files (``calibrate.py``, ``loss.py``, ``model.py``, ``train.py``,
+``visualize.py``) land directly in the entry, alongside ``checkpoint.pt`` and
+``train.log`` -- not nested in their own subfolder.
+
 Run after training finishes and, if wanted, after ``visualize.py`` has
 written its figures.
 
@@ -67,7 +71,6 @@ def main() -> None:
 
     (entry / "data").mkdir(parents=True)
     (entry / "figures").mkdir()
-    (entry / "code").mkdir()
 
     shutil.copy2(args.checkpoint, entry / args.checkpoint.name)
     shutil.copy2(args.train_log, entry / args.train_log.name)
@@ -79,7 +82,7 @@ def main() -> None:
     for name in CODE_FILES:
         source = Path(name)
         if source.is_file():
-            shutil.copy2(source, entry / "code" / name)
+            shutil.copy2(source, entry / name)
         else:
             print(f"[warn] {name} not found, skipped")
 
