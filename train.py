@@ -4,8 +4,8 @@ Run with ``python train.py``. Every quantity below is SI (metres, seconds,
 Kelvin); the raw ``.npy`` files store millimetres and are converted on load.
 
 Each file under ``--data-dir`` is a structured grid of
-``(x, y, z, t, P, T)`` rows -- ``321 x 81 x 49 x 31 = 39495519`` for the shipped
-``data_100W.npy``. ``P`` is the branch input and is constant within a file, so
+``(x, y, z, t, P, T)`` rows -- ``81 x 21 x 13 x 31 = 685503`` for the shipped
+``data_500W.npy``. ``P`` is the branch input and is constant within a file, so
 the branch network only has something to learn once several files at different
 powers are present; all of them are globbed and concatenated automatically.
 """
@@ -31,33 +31,33 @@ MM = 1.0e-3
 
 # ---------------------------------------------------------------------------
 # Fitted jointly across all seven powers by `python calibrate.py`. The
-# top-surface energy balance closes to 0.89% of peak flux. Re-run calibrate.py
+# top-surface energy balance closes to 0.99% of peak flux. Re-run calibrate.py
 # whenever the contents of the data directory change.
 # ---------------------------------------------------------------------------
-ABSORPTIVITY = 0.4756  # A [-]
-BEAM_RADIUS = 1.5187 * MM  # r_b [m]
-LASER_START_X = 4.9789 * MM
-LASER_Y = 5.0000 * MM
-SCAN_SPEED = 10.0001 * MM  # [m s^-1]
+ABSORPTIVITY = 0.4686  # A [-]
+BEAM_RADIUS = 1.7170 * MM  # r_b [m]
+LASER_START_X = 4.8586 * MM
+LASER_Y = 4.9924 * MM
+SCAN_SPEED = 9.9991 * MM  # [m s^-1]
 
-# `conductivity` follows from the fitted diffusivity alpha = 2.3657e-6 m^2/s
-# (corr 0.978 against the interior Laplacian) and the assumed rho and c_p; only
+# `conductivity` follows from the fitted diffusivity alpha = 2.3954e-6 m^2/s
+# (corr 0.980 against the interior Laplacian) and the assumed rho and c_p; only
 # the ratio k/(rho*c_p) is identifiable from the data. `convection_coeff` and
 # `emissivity` are NOT identifiable -- on the lateral faces the normal
-# derivative sits at the noise floor of the export grid -- so they stay as
-# inputs. They account for ~2.5% of the top-surface balance.
+# derivative sits at the noise floor of the 0.5 mm export grid -- so they stay
+# as inputs. They account for ~2.5% of the top-surface balance.
 PROPERTIES = ThermalProperties(
     density=7990.0,  # rho [kg m^-3]      (assumed)
     specific_heat=500.0,  # c_p [J kg^-1 K^-1] (assumed)
-    conductivity=9.4508,  # k [W m^-1 K^-1]    (= alpha * rho * c_p)
+    conductivity=9.5697,  # k [W m^-1 K^-1]    (= alpha * rho * c_p)
     convection_coeff=20.0,  # h [W m^-2 K^-1]    (assumed)
     emissivity=0.35,  # epsilon [-]        (assumed)
     ambient_temperature=298.0,  # T_amb [K]  (matches t=0 and z=0 in the data)
 )
 
-# The 0.125 mm grids bottom out at exactly T_amb, so nothing is clipped. Kept
-# for coarser exports, whose sub-ambient rows were a solver artefact: with
-# heating only, T can never fall below T_amb.
+# Sub-ambient rows (~5%, minimum 289.8 K) are a solver artefact: with heating
+# only, T can never fall below T_amb. Left untouched by default rather than
+# silently editing the source data.
 CLIP_SUBAMBIENT = False
 
 
@@ -237,23 +237,12 @@ def sample_data(
     coords: Tensor,
     power: Tensor,
     temperature: Tensor,
-    train_index: Tensor,
     count: int,
     generator: torch.Generator,
-    device: torch.device,
 ) -> PointSet:
-    """Draw ``count`` training rows from the CPU-resident dataset onto ``device``.
-
-    The dataset itself never leaves the CPU: at 276M points the coordinates
-    alone are 4.4 GB in float32, and gathering the training split would double
-    that again, leaving no room for the autograd graph of the PDE residual.
-    """
-    where = torch.randint(0, train_index.numel(), (count,), generator=generator)
-    index = train_index[where]
+    index = torch.randint(0, coords.size(0), (count,), generator=generator, device=coords.device)
     return PointSet(
-        laser_power=power[index].to(device),
-        coords=coords[index].to(device),
-        temperature=temperature[index].to(device),
+        laser_power=power[index], coords=coords[index], temperature=temperature[index]
     )
 
 
@@ -331,28 +320,30 @@ def main() -> None:
 
     coords_np, power_np, temperature_np = load_dataset(sorted(args.data_dir.glob("*.npy")))
 
-    coords = torch.as_tensor(coords_np, dtype=dtype)
-    power = torch.as_tensor(power_np, dtype=dtype)
-    temperature = torch.as_tensor(temperature_np, dtype=dtype)
+    coords = torch.as_tensor(coords_np, dtype=dtype, device=device)
+    power = torch.as_tensor(power_np, dtype=dtype, device=device)
+    temperature = torch.as_tensor(temperature_np, dtype=dtype, device=device)
 
-    bounds = torch.stack((coords.min(dim=0).values, coords.max(dim=0).values), dim=1)
-    domain = Domain(bounds=bounds.to(device))
-    powers = torch.unique(power).to(device)
+    domain = Domain(bounds=torch.stack((coords.min(dim=0).values, coords.max(dim=0).values), dim=1))
+    powers = torch.unique(power)
     max_power = float(powers.max())
     temperature_rise = float(temperature.max() - PROPERTIES.ambient_temperature)
 
-    # The dataset stays on the CPU and `sample_data` moves one batch at a time;
-    # only the collocation and boundary points are drawn on the device.
-    generator = torch.Generator().manual_seed(args.seed)
-    device_generator = torch.Generator(device=device).manual_seed(args.seed)
-
-    permutation = torch.randperm(coords.size(0), generator=generator)
+    generator = torch.Generator(device=device).manual_seed(args.seed)
+    permutation = torch.randperm(coords.size(0), generator=generator, device=device)
     validation_size = int(args.val_fraction * coords.size(0))
     val_index, train_index = permutation[:validation_size], permutation[validation_size:]
 
-    val_coords = coords[val_index].to(device)
-    val_power = power[val_index].to(device)
-    val_temperature = temperature[val_index].to(device)
+    train_coords, train_power, train_temperature = (
+        coords[train_index],
+        power[train_index],
+        temperature[train_index],
+    )
+    val_coords, val_power, val_temperature = (
+        coords[val_index],
+        power[val_index],
+        temperature[val_index],
+    )
 
     model, architecture = build_model(domain, temperature_rise, max_power)
     model = model.to(device=device, dtype=dtype)
@@ -397,13 +388,13 @@ def main() -> None:
         total, components = criterion(
             model,
             data=sample_data(
-                coords, power, temperature, train_index, args.batch_data, generator, device
+                train_coords, train_power, train_temperature, args.batch_data, generator
             ),
-            collocation=sample_collocation(domain, powers, args.batch_physics, device_generator),
-            bottom=sample_bottom(domain, powers, args.batch_boundary, device_generator),
-            top=sample_top(domain, powers, args.batch_boundary, device_generator),
-            surrounding=sample_surrounding(domain, powers, args.batch_boundary, device_generator),
-            initial=sample_initial(domain, powers, args.batch_boundary, device_generator),
+            collocation=sample_collocation(domain, powers, args.batch_physics, generator),
+            bottom=sample_bottom(domain, powers, args.batch_boundary, generator),
+            top=sample_top(domain, powers, args.batch_boundary, generator),
+            surrounding=sample_surrounding(domain, powers, args.batch_boundary, generator),
+            initial=sample_initial(domain, powers, args.batch_boundary, generator),
         )
         total.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
