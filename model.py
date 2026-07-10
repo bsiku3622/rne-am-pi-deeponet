@@ -202,9 +202,15 @@ class DeepONeuralNet(nn.Module):
     """Physics-informed DeepONet for a transient 3-D temperature field.
 
     The branch network encodes the laser process parameter(s) ``P`` and the
-    trunk network encodes the space-time query point ``(x, y, z, t)``. Their
-    latent codes are combined by an inner product to predict the temperature
-    ``T_hat(x, y, z, t; P)``.
+    trunk network encodes the space-time query point ``(x, y, z, t)`` plus one
+    engineered feature, the known Gaussian laser-proximity term also used to
+    build the top-surface flux BC in ``train.py``. A tanh MLP is biased toward
+    smooth, low-frequency functions (spectral bias), so it systematically
+    widens and flattens the laser's narrow moving spike no matter how the data
+    is sampled; handing the network this feature directly -- computed from
+    ``coords`` inside :meth:`forward` so autograd still differentiates through
+    it -- gives it a sharp, correctly-scaled building block instead of asking
+    it to synthesise one from scratch.
 
     The activation defaults to ``tanh`` because the PDE residual needs a
     non-vanishing second derivative; piecewise-linear activations such as
@@ -217,7 +223,8 @@ class DeepONeuralNet(nn.Module):
     dimensionally correct without any manual rescaling.
     """
 
-    trunk_input_dim = 4
+    physical_dim = 4  # (x, y, z, t)
+    trunk_input_dim = physical_dim + 1  # + laser-proximity feature
 
     # Declared so type checkers see `Tensor` rather than `Tensor | Module`, which
     # is what `nn.Module.__getattr__` is annotated to return for buffers.
@@ -227,6 +234,10 @@ class DeepONeuralNet(nn.Module):
     branch_scale: Tensor
     temperature_offset: Tensor
     temperature_scale: Tensor
+    laser_beam_radius: Tensor
+    laser_start_x: Tensor
+    laser_y: Tensor
+    laser_scan_speed: Tensor
 
     def __init__(
         self,
@@ -242,6 +253,10 @@ class DeepONeuralNet(nn.Module):
         branch_scale: Sequence[float] | None = None,
         temperature_offset: float = 0.0,
         temperature_scale: float = 1.0,
+        laser_beam_radius: float = 1.0,
+        laser_start_x: float = 0.0,
+        laser_y: float = 0.0,
+        laser_scan_speed: float = 0.0,
     ) -> None:
         super().__init__()
         self.branch_input_dim = branch_input_dim
@@ -257,10 +272,10 @@ class DeepONeuralNet(nn.Module):
         )
 
         self.register_buffer(
-            "coord_mean", _normalisation_buffer(coord_mean, self.trunk_input_dim, 0.0)
+            "coord_mean", _normalisation_buffer(coord_mean, self.physical_dim, 0.0)
         )
         self.register_buffer(
-            "coord_scale", _normalisation_buffer(coord_scale, self.trunk_input_dim, 1.0)
+            "coord_scale", _normalisation_buffer(coord_scale, self.physical_dim, 1.0)
         )
         self.register_buffer(
             "branch_mean", _normalisation_buffer(branch_mean, branch_input_dim, 0.0)
@@ -272,6 +287,18 @@ class DeepONeuralNet(nn.Module):
             raise ValueError("temperature_scale must be non-zero")
         self.register_buffer("temperature_offset", torch.tensor(float(temperature_offset)))
         self.register_buffer("temperature_scale", torch.tensor(float(temperature_scale)))
+        self.register_buffer("laser_beam_radius", torch.tensor(float(laser_beam_radius)))
+        self.register_buffer("laser_start_x", torch.tensor(float(laser_start_x)))
+        self.register_buffer("laser_y", torch.tensor(float(laser_y)))
+        self.register_buffer("laser_scan_speed", torch.tensor(float(laser_scan_speed)))
+
+    def _laser_feature(self, coords: Tensor) -> Tensor:
+        """``exp(-2*((x - x_l(t))^2 + (y - y_l)^2) / r_b^2)``, the same Gaussian
+        ``train.laser_flux`` scales by the peak flux for the top BC."""
+        x, y, t = coords[:, 0:1], coords[:, 1:2], coords[:, 3:4]
+        centre_x = self.laser_start_x + self.laser_scan_speed * t
+        squared_distance = (x - centre_x) ** 2 + (y - self.laser_y) ** 2
+        return torch.exp(-2.0 * squared_distance / self.laser_beam_radius**2)
 
     def forward(self, laser_power: Tensor, coords: Tensor) -> Tensor:
         """Predict temperature at ``coords`` for the process parameters ``laser_power``.
@@ -281,15 +308,16 @@ class DeepONeuralNet(nn.Module):
         holding ``(x, y, z, t)`` in physical units. Returns ``[batch, 1]`` in
         the same temperature unit as ``temperature_offset``.
         """
-        if coords.dim() != 2 or coords.size(-1) != self.trunk_input_dim:
+        if coords.dim() != 2 or coords.size(-1) != self.physical_dim:
             raise ValueError(
-                f"coords must have shape [batch, {self.trunk_input_dim}] for (x, y, z, t), "
+                f"coords must have shape [batch, {self.physical_dim}] for (x, y, z, t), "
                 f"got {tuple(coords.shape)}"
             )
 
         normalised_coords = (coords - self.coord_mean) / self.coord_scale
+        trunk_input = torch.cat([normalised_coords, self._laser_feature(coords)], dim=-1)
         normalised_power = (laser_power - self.branch_mean) / self.branch_scale
-        latent = self.operator(normalised_power, normalised_coords)
+        latent = self.operator(normalised_power, trunk_input)
         return self.temperature_offset + self.temperature_scale * latent
 
     def derivatives(
@@ -316,7 +344,7 @@ class DeepONeuralNet(nn.Module):
             grad_outputs=torch.ones_like(temperature),
             create_graph=True,
         )[0]
-        T_x, T_y, T_z, T_t = (first[:, i : i + 1] for i in range(self.trunk_input_dim))
+        T_x, T_y, T_z, T_t = (first[:, i : i + 1] for i in range(self.physical_dim))
 
         if not second_order:
             return FieldDerivatives(T=temperature, T_x=T_x, T_y=T_y, T_z=T_z, T_t=T_t)

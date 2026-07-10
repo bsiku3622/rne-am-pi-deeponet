@@ -294,6 +294,10 @@ def build_model(
         branch_scale=[max_power],
         temperature_offset=PROPERTIES.ambient_temperature,
         temperature_scale=temperature_rise,
+        laser_beam_radius=BEAM_RADIUS,
+        laser_start_x=LASER_START_X,
+        laser_y=LASER_Y,
+        laser_scan_speed=SCAN_SPEED,
     )
     return DeepONeuralNet(**architecture), architecture
 
