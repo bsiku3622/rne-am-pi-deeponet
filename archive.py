@@ -3,9 +3,10 @@
 Renders the top/track/scanline figures with ``visualize.py``, then copies the
 checkpoint, the TensorBoard run, the data it was trained on, those figures,
 and the exact code that produced it into
-``archive/<run>_<minP>_<maxP>_<spacing_mm>/`` (power range and grid spacing
-parsed from the ``data_<power>W.npy`` filenames and the x-axis of the first
-file), locks every file read-only, and clears the root (every subdirectory
+``archive/<run>_<minP>_<maxP>_<spacing_mm>[-<tag>]/`` (power range and grid
+spacing parsed from the ``data_<power>W.npy`` filenames and the x-axis of the
+first file; ``--tag`` appends a suffix identifying the code variant, e.g.
+``-gaussfeature``), locks every file read-only, and clears the root (every subdirectory
 under ``runs/`` -- not just ``<run>`` -- plus ``checkpoint.pt``, ``train.log``,
 ``train.err``, ``.train.pid``, ``figures/*.png``). ``runs/`` itself is kept
 (TensorBoard needs the directory to exist) and ``data/`` is left alone -- it
@@ -124,6 +125,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-visualize", action="store_true", help="archive without rendering figures"
     )
+    parser.add_argument(
+        "--tag",
+        type=str,
+        default=None,
+        help="suffix describing the experiment variant, e.g. 'gaussfeature'; appended as -<tag>",
+    )
     return parser.parse_args()
 
 
@@ -148,7 +155,10 @@ def main() -> None:
         )
     spacing = grid_spacing_mm(data_files[0])
 
-    entry = args.archive_dir / f"{args.run}_{powers[0]:g}_{powers[-1]:g}_{spacing:g}"
+    name = f"{args.run}_{powers[0]:g}_{powers[-1]:g}_{spacing:g}"
+    if args.tag:
+        name += f"-{args.tag}"
+    entry = args.archive_dir / name
     if entry.exists():
         raise FileExistsError(f"{entry} already exists")
 
