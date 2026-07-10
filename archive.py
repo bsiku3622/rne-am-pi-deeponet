@@ -2,9 +2,11 @@
 
 Renders the top/track/scanline figures with ``visualize.py``, then copies the
 checkpoint, the TensorBoard run, the data it was trained on, those figures,
-and the exact code that produced it into ``archive/<run>_<N>powers/``, locks
-every file read-only, and clears the root (every subdirectory under
-``runs/`` -- not just ``<run>`` -- plus ``checkpoint.pt``, ``train.log``,
+and the exact code that produced it into
+``archive/<run>_<minP>_<maxP>_<spacing_mm>/`` (power range and grid spacing
+parsed from the ``data_<power>W.npy`` filenames and the x-axis of the first
+file), locks every file read-only, and clears the root (every subdirectory
+under ``runs/`` -- not just ``<run>`` -- plus ``checkpoint.pt``, ``train.log``,
 ``train.err``, ``.train.pid``, ``figures/*.png``). ``runs/`` itself is kept
 (TensorBoard needs the directory to exist) and ``data/`` is left alone -- it
 is the live working dataset, not part of any one run.
@@ -33,6 +35,8 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+
+import numpy as np
 
 CODE_FILES = ("calibrate.py", "loss.py", "model.py", "train.py", "visualize.py")
 ROOT_CLEANUP = ("checkpoint.pt", "train.log", "train.err", ".train.pid")
@@ -69,6 +73,12 @@ def unlink_writable(path: Path) -> None:
 def power_of(path: Path) -> float | None:
     match = re.search(r"data_([\d.]+)W\.npy$", path.name)
     return float(match.group(1)) if match else None
+
+
+def grid_spacing_mm(path: Path) -> float:
+    """Spacing between adjacent x-grid points, read straight off the raw file (in mm)."""
+    x = np.unique(np.load(path, mmap_mode="r")[:, 0])
+    return round(float(x[1] - x[0]), 6)
 
 
 def render_figures(
@@ -130,7 +140,15 @@ def main() -> None:
     if not data_files:
         raise FileNotFoundError(f"no .npy files under {args.data_dir}")
 
-    entry = args.archive_dir / f"{args.run}_{len(data_files)}powers"
+    powers = sorted(p for p in (power_of(path) for path in data_files) if p is not None)
+    if not powers:
+        raise ValueError(
+            f"could not parse a power from any filename under {args.data_dir}; "
+            "expected data_<power>W.npy"
+        )
+    spacing = grid_spacing_mm(data_files[0])
+
+    entry = args.archive_dir / f"{args.run}_{powers[0]:g}_{powers[-1]:g}_{spacing:g}"
     if entry.exists():
         raise FileExistsError(f"{entry} already exists")
 
@@ -146,15 +164,8 @@ def main() -> None:
     if args.skip_visualize:
         print("[skip] visualize.py not run (--skip-visualize)")
     else:
-        power = args.power
-        if power is None:
-            powers = sorted(p for p in (power_of(path) for path in data_files) if p is not None)
-            if not powers:
-                print("[warn] could not parse a power from any data filename; pass --power")
-            else:
-                power = powers[len(powers) // 2]
-        if power is not None:
-            render_figures(entry / "figures", args.checkpoint, args.data_dir, power)
+        power = args.power if args.power is not None else powers[len(powers) // 2]
+        render_figures(entry / "figures", args.checkpoint, args.data_dir, power)
 
     for name in CODE_FILES:
         source = Path(name)
