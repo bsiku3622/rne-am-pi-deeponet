@@ -1,3 +1,15 @@
+> ## This repository has moved
+>
+> The model now lives in **[bsiku3622/rne-kaist](https://github.com/bsiku3622/rne-kaist)**,
+> under `models/deeponet/`, alongside the solver, the other models, and the shared
+> grid/metrics/plotting/archiving they all use. Every commit below is preserved
+> there -- the two repositories were grafted in with their history intact, so
+> `git log` in the monorepo still reaches this one's root commit.
+>
+> This repository is archived and read-only. Nothing further will be pushed here.
+
+---
+
 # pi-deeponet
 
 A physics-informed DeepONet that predicts the transient 3-D temperature field of a
